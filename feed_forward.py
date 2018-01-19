@@ -20,7 +20,6 @@ class FeedForward:
         self.input_dim = dim_specs[0]
         self.activation = activation
         self.dim_specs = dim_specs
-        self.current = self.inputs
         self.data_set = None
         self.train_op = None
         self.output = None
@@ -33,6 +32,8 @@ class FeedForward:
                          for i in range(1, self.n_layers)]
 
         self.bias_list = [tf.Variable(tf.constant(0.1, shape=[1, self.dim_specs[i]])) for i in range(1, self.n_layers)]
+
+        self.current = self.inputs
 
     def build_model(self, layer, output_layer):
 
@@ -73,10 +74,47 @@ class FeedForward:
         pass
 
 
-class LadderNetwork(FeedForward):
+class LadderNetwork:
 
-    def __init__(self, dim_specs, activation, output_activation):
+    def __init__(self, dim_specs, activation, output_activation, noise_std):
+        self.corrupted_encoder = LadderEncoder(dim_specs, activation, output_activation, noise_std)
+        self.clean_encoder = LadderEncoder(dim_specs, activation, output_activation, 0)
+        self.rung = LadderRung(activation, noise_std)
+        self.top_rung = LadderRung(output_activation, noise_std)
+        self.corrupted_encoder.build_encoder(self.rung, self.top_rung)
+        self.supervised_loss = tf.nn.softmax_cross_entropy_with_logits(labels=self.corrupted_encoder.labels,
+                                                                       logits=self.corrupted_encoder.current)
+
+
+class LadderEncoder(FeedForward):
+
+    def __init__(self, dim_specs, activation, output_activation, noise_std):
+
+        """
+        :param noise_std: standard deviation of gaussian noise used for corrupting layers
+        """
         super(FeedForward).__init__(dim_specs, activation, output_activation)
+
+        self.noise_std = noise_std
+
+        self.scaling_list = [tf.Variable(tf.truncated_normal(shape=[self.dim_specs[i-1, i]], stddev=0.1))
+                             for i in range(self.n_layers)]
+
+        self.stored_values = []
+        self.stored_means = []
+        self.stored_stds = []
+
+    def build_encoder(self, layer, output_layer):
+        self.current = layer.corrupt(self.current, layer.noise_std, self.input_dim)
+        for i in range(self.n_layers - 2):
+            self.current = layer.climb(self.current, self.var_list[i], self.bias_list[i],
+                                       self.scaling_list[i], self.dim_specs[i])
+        self.current = output_layer.climb(self.current, self.var_list[-1], self.bias_list[-1],
+                                          self.scaling_list[-1], self.dim_specs[-1])
+
+
+class LadderDecoder(FeedForward):
+    pass
 
 
 class Layer:
@@ -86,3 +124,21 @@ class Layer:
 
     def feed_forward(self, layer_inputs, layer_weight, layer_bias):
         return self.activation(tf.matmul(layer_inputs, layer_weight) + layer_bias)
+
+
+class LadderRung(Layer):
+
+    def __init__(self, activation, noise_std):
+        super(Layer).__init__(activation)
+        self.noise_std = noise_std
+
+    def corrupt(self, values, dim):
+        return values + tf.random_normal(shape=[dim], mean=0, stddev=self.noise_std)
+
+    def climb(self, layer_inputs, layer_weights, layer_bias, layer_scaling, latent_dim):
+        latent_raw = tf.matmul(layer_inputs, layer_weights)
+        batch_mean, batch_std = tf.nn.moments(latent_raw, axes=0)
+        latent_normalized = (latent_raw - batch_mean) / tf.sqrt(batch_std)
+        latent_corrupted = self.corrupt(latent_normalized, latent_dim)
+        latent_final = tf.multiply(layer_scaling, layer_bias + latent_corrupted)
+        return latent_final, latent_corrupted, batch_mean, batch_std
