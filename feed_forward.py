@@ -1,4 +1,4 @@
-from __future__ import print_function
+
 import tensorflow as tf
 import numpy as np
 
@@ -15,7 +15,7 @@ class FeedForward:
         """
 
         self.output_activation = output_activation
-        self.n_layers = len(dim_specs) - 1
+        self.n_layers = len(dim_specs)
         self.output_dim = dim_specs[-1]
         self.input_dim = dim_specs[0]
         self.activation = activation
@@ -32,7 +32,7 @@ class FeedForward:
         self.var_list = [tf.Variable(tf.truncated_normal(shape=[self.dim_specs[i-1], self.dim_specs[i]], stddev=0.1))
                          for i in range(1, self.n_layers)]
 
-        self.bias_list = [tf.Variable(tf.constant(0.1, shape=[self.dim_specs[i]])) for i in range(1, self.n_layers)]
+        self.bias_list = [tf.Variable(tf.constant(0.1, shape=[1, self.dim_specs[i]])) for i in range(1, self.n_layers)]
 
     def build_model(self, layer, output_layer):
 
@@ -41,7 +41,7 @@ class FeedForward:
         :param layer: an instance of the Layer class for the hidden layers of the model
         :param output_layer: an instance of the Layer class for the output layer of the model
         """
-        for i in range(self.n_layers - 1):
+        for i in range(self.n_layers - 2):
             self.current = layer.feed_forward(self.current, self.var_list[i], self.bias_list[i])
         self.current = output_layer.feed_forward(self.current, self.var_list[-1], self.bias_list[-1])
         self.loss = tf.nn.softmax_cross_entropy_with_logits(labels=self.labels, logits=self.current)
@@ -58,21 +58,25 @@ class FeedForward:
         :param eval_int: samples in between printing data about training progress
         """
         self.train_op = tf.train.AdamOptimizer(lr).minimize(self.loss)
-        self.data_set = zip(data_inputs, data_labels)
+        self.data_set = list(zip(data_inputs, data_labels))
         with tf.Session() as sess:
             sess.run(tf.global_variables_initializer())
             for i in range(iters):
                 np.random.shuffle(self.data_set)
-                batch_x, batch_y = zip(*self.data_set[:batch_size])
+                batch_x, batch_y = list(zip(*self.data_set[:batch_size]))
                 train_feed = {self.inputs: batch_x, self.labels: batch_y}
                 if i % eval_int == 0:
                     print("Loss: ", self.loss.eval(sess, train_feed))
                 sess.run(self.train_op, train_feed)
 
-
-
     def predict(self):
         pass
+
+
+class LadderNetwork(FeedForward):
+
+    def __init__(self, dim_specs, activation, output_activation):
+        super(FeedForward).__init__(dim_specs, activation, output_activation)
 
 
 class Layer:
