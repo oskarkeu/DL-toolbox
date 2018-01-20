@@ -1,4 +1,5 @@
 
+
 import tensorflow as tf
 import numpy as np
 
@@ -84,6 +85,13 @@ class LadderNetwork:
         self.corrupted_encoder.build_encoder(self.rung, self.top_rung)
         self.supervised_loss = tf.nn.softmax_cross_entropy_with_logits(labels=self.corrupted_encoder.labels,
                                                                        logits=self.corrupted_encoder.current)
+        self.decoder = LadderDecoder(dim_specs, self.clean_encoder.stored_values, self.clean_encoder.stored_means,
+                                     self.clean_encoder.stored_stds)
+        self.decoder.build_decoder(self.rung, self.corrupted_encoder.current)
+        self.semi_supervised_loss = self.supervised_loss + self.decoder.unsupervised_loss
+
+    def train_ladder_network(self):
+        pass
 
 
 class LadderEncoder(FeedForward):
@@ -115,11 +123,27 @@ class LadderEncoder(FeedForward):
 
 class LadderDecoder:
 
-    def __init__(self, dim_specs):
+    def __init__(self, dim_specs, skip_values, skip_means, skip_stds):
         self.dim_specs = dim_specs
         self.n_layers = len(dim_specs)
+        self.skip_values = skip_values
+        self.skip_means = skip_means
+        self.skip_stds = skip_stds
         self.denoising_weights = [tf.Variable(tf.truncated_normal(shape=[dim_specs[i], 10]))
-                                  for i in range(self.n_layers)]
+                                  for i in range(1, self.n_layers)]
+        self.decoder_weights = [tf.Variable(tf.truncated_normal(shape=[dim_specs[self.n_layers - i - 1]], stddev=0.1))
+                                for i in range(1, self.n_layers)]
+        self.unsupervised_loss = None
+
+    def build_decoder(self, layer, top):
+        current_normal, current = layer.climb_down(top, self.dim_specs[0],
+                                   self.skip_means[0], self.skip_stds[0], self.denoising_weights[0])
+        self.unsupervised_loss = tf.reduce_sum(tf.square(current_normal - self.skip_values[0]), reduction_indices=1)
+        for i in range(self.n_layers - 2):
+            current_normal, current = layer.climb_down(top, self.dim_specs[i], self.skip_means[i], self.skip_stds[i],
+                             self.denoising_weights[i], self.decoder_weights[i])
+            self.unsupervised_loss += tf.reduce_sum(tf.square(current_normal - self.skip_values[0]),
+                                                    reduction_indices=1)
 
 
 class Layer:
@@ -130,6 +154,11 @@ class Layer:
     def feed_forward(self, layer_inputs, layer_weight, layer_bias):
         return self.activation(tf.matmul(layer_inputs, layer_weight) + layer_bias)
 
+    @staticmethod
+    def batch_norm(values):
+        batch_mean, batch_var = tf.nn.moments(values, axes=0)
+        return (values - batch_mean) / tf.sqrt(batch_var), batch_mean, tf.sqrt(batch_var)
+
 
 class LadderRung(Layer):
 
@@ -139,16 +168,22 @@ class LadderRung(Layer):
 
     def climb_up(self, layer_inputs, layer_weights, layer_bias, layer_scaling, latent_dim):
         latent_raw = tf.matmul(layer_inputs, layer_weights)
-        batch_mean, batch_std = tf.nn.moments(latent_raw, axes=0)
-        latent_normalized = (latent_raw - batch_mean) / tf.sqrt(batch_std)
+        latent_normalized, batch_mean, batch_std = self.batch_norm(latent_raw)
         latent_corrupted = self.corrupt(latent_normalized, latent_dim)
         latent_final = tf.multiply(layer_scaling, layer_bias + latent_corrupted)
         return latent_final, latent_corrupted, batch_mean, batch_std
 
-    def climb_down(self, corrupted_inputs, layer_weights):
-        projection = tf.matmul(corrupted_inputs, layer_weights)
-        batch_mean, batch_std = tf.nn.moments(projection, axes=0)
-        projection_normalized = (projection - batch_mean) / batch_std
+    def climb_down(self, corrupted_inputs, latent_dim, skip_mean, skip_std, denoising_weights, layer_weights=None):
+        if layer_weights is None: projection = corrupted_inputs
+        else: projection = tf.matmul(corrupted_inputs, layer_weights)
+        projection_normalized, _, _ = self.batch_norm(projection)
+        reconstruction = tf.constant(0, shape=[0, latent_dim])
+        for i in range(latent_dim):
+            denoising_func_1 = self.expressive_nonlinearity(projection_normalized[:, i], denoising_weights[i, :5])
+            denoising_func_2 = self.expressive_nonlinearity(projection_normalized[:, i], denoising_weights[i, 5:])
+            reconstruction_i = (corrupted_inputs[:, i] - denoising_func_1) * denoising_func_2 + denoising_func_1
+            reconstruction = tf.concat([reconstruction, reconstruction_i], axis=1)
+        return (reconstruction - skip_mean) / skip_std, reconstruction
 
     def corrupt(self, values, dim):
         return values + tf.random_normal(shape=[dim], mean=0, stddev=self.noise_std)
