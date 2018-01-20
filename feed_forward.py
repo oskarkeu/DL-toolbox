@@ -107,14 +107,19 @@ class LadderEncoder(FeedForward):
     def build_encoder(self, layer, output_layer):
         self.current = layer.corrupt(self.current, layer.noise_std, self.input_dim)
         for i in range(self.n_layers - 2):
-            self.current = layer.climb(self.current, self.var_list[i], self.bias_list[i],
+            self.current = layer.climb_up(self.current, self.var_list[i], self.bias_list[i],
                                        self.scaling_list[i], self.dim_specs[i])
-        self.current = output_layer.climb(self.current, self.var_list[-1], self.bias_list[-1],
+        self.current = output_layer.climb_up(self.current, self.var_list[-1], self.bias_list[-1],
                                           self.scaling_list[-1], self.dim_specs[-1])
 
 
-class LadderDecoder(FeedForward):
-    pass
+class LadderDecoder:
+
+    def __init__(self, dim_specs):
+        self.dim_specs = dim_specs
+        self.n_layers = len(dim_specs)
+        self.denoising_weights = [tf.Variable(tf.truncated_normal(shape=[dim_specs[i], 10]))
+                                  for i in range(self.n_layers)]
 
 
 class Layer:
@@ -132,13 +137,24 @@ class LadderRung(Layer):
         super(Layer).__init__(activation)
         self.noise_std = noise_std
 
-    def corrupt(self, values, dim):
-        return values + tf.random_normal(shape=[dim], mean=0, stddev=self.noise_std)
-
-    def climb(self, layer_inputs, layer_weights, layer_bias, layer_scaling, latent_dim):
+    def climb_up(self, layer_inputs, layer_weights, layer_bias, layer_scaling, latent_dim):
         latent_raw = tf.matmul(layer_inputs, layer_weights)
         batch_mean, batch_std = tf.nn.moments(latent_raw, axes=0)
         latent_normalized = (latent_raw - batch_mean) / tf.sqrt(batch_std)
         latent_corrupted = self.corrupt(latent_normalized, latent_dim)
         latent_final = tf.multiply(layer_scaling, layer_bias + latent_corrupted)
         return latent_final, latent_corrupted, batch_mean, batch_std
+
+    def climb_down(self, corrupted_inputs, layer_weights):
+        projection = tf.matmul(corrupted_inputs, layer_weights)
+        batch_mean, batch_std = tf.nn.moments(projection, axes=0)
+        projection_normalized = (projection - batch_mean) / batch_std
+
+    def corrupt(self, values, dim):
+        return values + tf.random_normal(shape=[dim], mean=0, stddev=self.noise_std)
+
+    @staticmethod
+    def expressive_nonlinearity(u, a):
+        return a[0] * tf.nn.sigmoid(a[1] * u + a[2]) + a[3] * u + a[4]
+
+
