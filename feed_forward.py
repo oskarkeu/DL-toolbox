@@ -1,5 +1,3 @@
-
-
 import tensorflow as tf
 import numpy as np
 
@@ -101,22 +99,21 @@ class LadderEncoder(FeedForward):
         """
         :param noise_std: standard deviation of gaussian noise used for corrupting layers
         """
-        super(FeedForward).__init__(dim_specs, activation, output_activation)
+        super().__init__(dim_specs, activation, output_activation)
 
         self.noise_std = noise_std
 
-        self.scaling_list = [tf.Variable(tf.truncated_normal(shape=[self.dim_specs[i-1, i]], stddev=0.1))
-                             for i in range(self.n_layers)]
+        self.scaling_list = [tf.constant(1.0, shape=[1, self.dim_specs[i]]) for i in range(1, self.n_layers)]
 
         self.stored_values = []
         self.stored_means = []
         self.stored_stds = []
 
     def build_encoder(self, layer, output_layer):
-        self.current = layer.corrupt(self.current, layer.noise_std, self.input_dim)
+        self.current = layer.corrupt(self.current, self.input_dim)
         for i in range(self.n_layers - 2):
             self.current = layer.climb_up(self.current, self.var_list[i], self.bias_list[i],
-                                       self.scaling_list[i], self.dim_specs[i])
+                                       self.scaling_list[i], self.dim_specs[i+1])
         self.current = output_layer.climb_up(self.current, self.var_list[-1], self.bias_list[-1],
                                           self.scaling_list[-1], self.dim_specs[-1])
 
@@ -142,7 +139,7 @@ class LadderDecoder:
         for i in range(self.n_layers - 2):
             current_normal, current = layer.climb_down(top, self.dim_specs[i], self.skip_means[i], self.skip_stds[i],
                              self.denoising_weights[i], self.decoder_weights[i])
-            self.unsupervised_loss += tf.reduce_sum(tf.square(current_normal - self.skip_values[0]),
+            self.unsupervised_loss += tf.reduce_sum(tf.square(current_normal - self.skip_values[i]),
                                                     reduction_indices=1)
 
 
@@ -155,20 +152,21 @@ class Layer:
         return self.activation(tf.matmul(layer_inputs, layer_weight) + layer_bias)
 
     @staticmethod
-    def batch_norm(values):
-        batch_mean, batch_var = tf.nn.moments(values, axes=0)
-        return (values - batch_mean) / tf.sqrt(batch_var), batch_mean, tf.sqrt(batch_var)
+    def normalize(values):
+        batch_mean = tf.reduce_mean(values, reduction_indices=0)
+        batch_std = tf.sqrt(tf.reduce_mean(tf.map_fn(lambda z: z - batch_mean, values), reduction_indices=0))
+        return (values - batch_mean) / batch_std, batch_mean, batch_std
 
 
 class LadderRung(Layer):
 
     def __init__(self, activation, noise_std):
-        super(Layer).__init__(activation)
+        super().__init__(activation)
         self.noise_std = noise_std
 
     def climb_up(self, layer_inputs, layer_weights, layer_bias, layer_scaling, latent_dim):
         latent_raw = tf.matmul(layer_inputs, layer_weights)
-        latent_normalized, batch_mean, batch_std = self.batch_norm(latent_raw)
+        latent_normalized, batch_mean, batch_std = self.normalize(latent_raw)
         latent_corrupted = self.corrupt(latent_normalized, latent_dim)
         latent_final = tf.multiply(layer_scaling, layer_bias + latent_corrupted)
         return latent_final, latent_corrupted, batch_mean, batch_std
@@ -176,7 +174,7 @@ class LadderRung(Layer):
     def climb_down(self, corrupted_inputs, latent_dim, skip_mean, skip_std, denoising_weights, layer_weights=None):
         if layer_weights is None: projection = corrupted_inputs
         else: projection = tf.matmul(corrupted_inputs, layer_weights)
-        projection_normalized, _, _ = self.batch_norm(projection)
+        projection_normalized, _, _ = self.normalize(projection)
         reconstruction = tf.constant(0, shape=[0, latent_dim])
         for i in range(latent_dim):
             denoising_func_1 = self.expressive_nonlinearity(projection_normalized[:, i], denoising_weights[i, :5])
@@ -186,10 +184,15 @@ class LadderRung(Layer):
         return (reconstruction - skip_mean) / skip_std, reconstruction
 
     def corrupt(self, values, dim):
-        return values + tf.random_normal(shape=[dim], mean=0, stddev=self.noise_std)
+        return values + tf.random_normal(shape=[1, dim], mean=0, stddev=self.noise_std)
 
     @staticmethod
     def expressive_nonlinearity(u, a):
         return a[0] * tf.nn.sigmoid(a[1] * u + a[2]) + a[3] * u + a[4]
 
 
+# Simple unit test for compiling ladder network
+
+ladder = LadderNetwork([5, 6, 7, 8, 9, 10], tf.nn.relu, tf.nn.softmax, 0.3)
+
+print(ladder.semi_supervised_loss)  # Should print out tensor object
